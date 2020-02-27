@@ -4,8 +4,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import random_split
 import argparse
 import os
+
+from utils import generate_from_labeled_file
+
 
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,11 +33,11 @@ def generate(name):
 
 
 class Model(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, num_keys):
+    def __init__(self, num_keys, hidden_size, num_layers):
         super(Model, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.lstm = nn.LSTM(num_keys, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, num_keys)
 
     def forward(self, x):
@@ -47,24 +51,37 @@ class Model(nn.Module):
 if __name__ == '__main__':
 
     # Hyperparameters
-    num_classes = 28
+    num_classes = 31
     num_epochs = 300
-    batch_size = 2048
-    input_size = 1
+    batch_size = 8192
     model_dir = 'model'
-    log = 'Adam_batch_size={}_epoch={}'.format(str(batch_size), str(num_epochs))
+    log = 'Adam_batch_size={}_epochs={}'.format(str(batch_size), str(num_epochs))
     parser = argparse.ArgumentParser()
     parser.add_argument('-num_layers', default=2, type=int)
     parser.add_argument('-hidden_size', default=64, type=int)
     parser.add_argument('-window_size', default=10, type=int)
+    parser.add_argument('-snapshot_period', default=10, type=int)
     args = parser.parse_args()
     num_layers = args.num_layers
     hidden_size = args.hidden_size
     window_size = args.window_size
+    snapshot_period = args.snapshot_period
 
-    model = Model(input_size, hidden_size, num_layers, num_classes).to(device)
-    seq_dataset = generate('hdfs_train')
-    dataloader = DataLoader(seq_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    model = Model(num_classes, hidden_size, num_layers).to(device)
+
+    seq_dataset = generate_from_labeled_file('/home/toni/Downloads/train.txt', window_size)
+
+    train_split = 0.8
+    valid_split = 0.2
+
+    train_size = int(len(seq_dataset) * train_split / (train_split + valid_split))
+    valid_size = len(seq_dataset) - train_size
+
+    train_dataset, valid_dataset = random_split(seq_dataset, [train_size, valid_size])
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+
     writer = SummaryWriter(log_dir='log/' + log)
 
     # Loss and optimizer
@@ -73,13 +90,16 @@ if __name__ == '__main__':
 
     # Train the model
     start_time = time.time()
-    total_step = len(dataloader)
-    for epoch in range(num_epochs):  # Loop over the dataset multiple times
+    train_total_step = len(train_dataloader)
+    valid_total_step = len(valid_dataloader)
+    for epoch in range(num_epochs):  # Loop over the train and validation datasets multiple times
         train_loss = 0
-        for step, (seq, label) in enumerate(dataloader):
+        valid_loss = 0
+        for step, (seq, label) in enumerate(train_dataloader):
             # Forward pass
-            seq = seq.clone().detach().view(-1, window_size, input_size).to(device)
-            output = model(seq)
+            seq = seq.clone().detach().view(-1, window_size).to(device)
+            x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+            output = model(x_onehot)
             loss = criterion(output, label.to(device))
 
             # Backward and optimize
@@ -87,13 +107,26 @@ if __name__ == '__main__':
             loss.backward()
             train_loss += loss.item()
             optimizer.step()
-            writer.add_graph(model, seq)
-        print('Epoch [{}/{}], train_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / total_step))
-        writer.add_scalar('train_loss', train_loss / total_step, epoch + 1)
+
+        for step, (seq, label) in enumerate(valid_dataloader):
+            seq = seq.clone().detach().view(-1, window_size).to(device)
+            x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+            output = model(x_onehot)
+            loss = criterion(output, label.to(device))
+            valid_loss += loss.item()
+            #writer.add_graph(model, x_onehot)
+
+        print('Epoch [{}/{}], train_loss: {:.4f}, valid_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / train_total_step, valid_loss / valid_total_step))
+        writer.add_scalar('train_loss', train_loss / train_total_step, epoch + 1)
+        writer.add_scalar('valid_loss', valid_loss / valid_total_step, epoch + 1)
+
+        if epoch % snapshot_period == 0:
+            if not os.path.isdir(model_dir):
+                os.makedirs(model_dir)
+            torch.save(model.state_dict(), model_dir + '/' + log + "_iteration=" + str(epoch) + '.pt')
+
+        writer.flush()
     elapsed_time = time.time() - start_time
     print('elapsed_time: {:.3f}s'.format(elapsed_time))
-    if not os.path.isdir(model_dir):
-        os.makedirs(model_dir)
-    torch.save(model.state_dict(), model_dir + '/' + log + '.pt')
     writer.close()
     print('Finished Training')

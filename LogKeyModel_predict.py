@@ -4,30 +4,30 @@ import time
 import argparse
 
 # Device configuration
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def generate(name):
     # If you what to replicate the DeepLog paper results(Actually, I have a better result than DeepLog paper results),
     # you should use the 'list' not 'set' to obtain the full dataset, I use 'set' just for test and acceleration.
-    hdfs = set()
-    # hdfs = []
-    with open('data/' + name, 'r') as f:
+    #hdfs = set()
+    hdfs = []
+    with open(name, 'r') as f:
         for ln in f.readlines():
-            ln = list(map(lambda n: n - 1, map(int, ln.strip().split())))
-            ln = ln + [-1] * (window_size + 1 - len(ln))
-            hdfs.add(tuple(ln))
-            # hdfs.append(tuple(ln))
+            ln = list(map(int, ln.strip().split()[2:]))
+            ln = ln #+ [-1] * (window_size + 1 - len(ln))
+            #hdfs.add(tuple(ln))
+            hdfs.append(tuple(ln))
     print('Number of sessions({}): {}'.format(name, len(hdfs)))
     return hdfs
 
 
 class Model(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, num_keys):
+    def __init__(self, num_keys, hidden_size, num_layers):
         super(Model, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.lstm = nn.LSTM(num_keys, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, num_keys)
 
     def forward(self, x):
@@ -41,9 +41,8 @@ class Model(nn.Module):
 if __name__ == '__main__':
 
     # Hyperparameters
-    num_classes = 28
-    input_size = 1
-    model_path = 'model/Adam_batch_size=2048_epoch=300.pt'
+    num_classes = 31
+    model_path = "model/Adam_batch_size=8192_epochs=300_iteration=290.pt"
     parser = argparse.ArgumentParser()
     parser.add_argument('-num_layers', default=2, type=int)
     parser.add_argument('-hidden_size', default=64, type=int)
@@ -55,36 +54,43 @@ if __name__ == '__main__':
     window_size = args.window_size
     num_candidates = args.num_candidates
 
-    model = Model(input_size, hidden_size, num_layers, num_classes).to(device)
+    model = Model(num_classes, hidden_size, num_layers).to(device)
     model.load_state_dict(torch.load(model_path))
     model.eval()
     print('model_path: {}'.format(model_path))
-    test_normal_loader = generate('hdfs_test_normal')
-    test_abnormal_loader = generate('hdfs_test_abnormal')
+    test_normal_loader = generate('/home/toni/Downloads/normal_test.txt')
+    test_abnormal_loader = generate('/home/toni/Downloads/anomaly_test.txt')
     TP = 0
     FP = 0
     # Test the model
     start_time = time.time()
     with torch.no_grad():
         for line in test_normal_loader:
+            if len(line) < window_size:
+                FP += 1
             for i in range(len(line) - window_size):
                 seq = line[i:i + window_size]
                 label = line[i + window_size]
-                seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size, input_size).to(device)
+                seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size).to(device)
+                x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
                 label = torch.tensor(label).view(-1).to(device)
-                output = model(seq)
+                output = model(x_onehot)
                 predicted = torch.argsort(output, 1)[0][-num_candidates:]
                 if label not in predicted:
                     FP += 1
                     break
+
     with torch.no_grad():
         for line in test_abnormal_loader:
+            if len(line) < window_size:
+                TP += 1
             for i in range(len(line) - window_size):
                 seq = line[i:i + window_size]
                 label = line[i + window_size]
-                seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size, input_size).to(device)
+                seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size).to(device)
+                x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
                 label = torch.tensor(label).view(-1).to(device)
-                output = model(seq)
+                output = model(x_onehot)
                 predicted = torch.argsort(output, 1)[0][-num_candidates:]
                 if label not in predicted:
                     TP += 1
@@ -96,5 +102,6 @@ if __name__ == '__main__':
     P = 100 * TP / (TP + FP)
     R = 100 * TP / (TP + FN)
     F1 = 2 * P * R / (P + R)
+
     print('false positive (FP): {}, false negative (FN): {}, Precision: {:.3f}%, Recall: {:.3f}%, F1-measure: {:.3f}%'.format(FP, FN, P, R, F1))
     print('Finished Predicting')
