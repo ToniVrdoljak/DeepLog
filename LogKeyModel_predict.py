@@ -14,7 +14,7 @@ def generate(name):
     hdfs = []
     with open(name, 'r') as f:
         for ln in f.readlines():
-            ln = list(map(int, ln.strip().split()[2:]))
+            ln = list(map(int, ln.strip().split()[1:]))
             ln = ln #+ [-1] * (window_size + 1 - len(ln))
             #hdfs.add(tuple(ln))
             hdfs.append(tuple(ln))
@@ -41,8 +41,8 @@ class Model(nn.Module):
 if __name__ == '__main__':
 
     # Hyperparameters
-    num_classes = 31
-    model_path = "model/Adam_batch_size=8192_epochs=300_iteration=290.pt"
+    num_classes = 43
+    model_path = "model/Adam_batch_size=64_epochs=3000_iteration=20.pt"
     parser = argparse.ArgumentParser()
     parser.add_argument('-num_layers', default=2, type=int)
     parser.add_argument('-hidden_size', default=64, type=int)
@@ -58,8 +58,8 @@ if __name__ == '__main__':
     model.load_state_dict(torch.load(model_path))
     model.eval()
     print('model_path: {}'.format(model_path))
-    test_normal_loader = generate('/home/toni/Downloads/normal_test.txt')
-    test_abnormal_loader = generate('/home/toni/Downloads/anomaly_test.txt')
+    test_normal_loader = generate('/home/toni/Downloads/openstack/normal_test.txt')
+    test_abnormal_loader = generate('/home/toni/Downloads/openstack/anomaly_representation.txt')
     TP = 0
     FP = 0
     # Test the model

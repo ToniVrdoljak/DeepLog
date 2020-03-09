@@ -8,7 +8,7 @@ from torch.utils.data import random_split
 import argparse
 import os
 
-from utils import generate_from_labeled_file
+from utils import generate_from_labeled_file, generate_from_labeled_openstack_file
 
 
 # Device configuration
@@ -51,9 +51,9 @@ class Model(nn.Module):
 if __name__ == '__main__':
 
     # Hyperparameters
-    num_classes = 31
-    num_epochs = 300
-    batch_size = 8192
+    num_classes = 43
+    num_epochs = 3000
+    batch_size = 256
     model_dir = 'model'
     log = 'Adam_batch_size={}_epochs={}'.format(str(batch_size), str(num_epochs))
     parser = argparse.ArgumentParser()
@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
     model = Model(num_classes, hidden_size, num_layers).to(device)
 
-    seq_dataset = generate_from_labeled_file('/home/toni/Downloads/train.txt', window_size)
+    seq_dataset = generate_from_labeled_openstack_file('/home/toni/Downloads/openstack/normal_train.txt', window_size)
 
     train_split = 0.8
     valid_split = 0.2
@@ -86,7 +86,8 @@ if __name__ == '__main__':
 
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters())
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, nesterov=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, threshold=0.001, threshold_mode='abs', cooldown=5, eps=0)
 
     # Train the model
     start_time = time.time()
@@ -119,6 +120,8 @@ if __name__ == '__main__':
         print('Epoch [{}/{}], train_loss: {:.4f}, valid_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / train_total_step, valid_loss / valid_total_step))
         writer.add_scalar('train_loss', train_loss / train_total_step, epoch + 1)
         writer.add_scalar('valid_loss', valid_loss / valid_total_step, epoch + 1)
+
+        scheduler.step(valid_loss / valid_total_step)
 
         if epoch % snapshot_period == 0:
             if not os.path.isdir(model_dir):
