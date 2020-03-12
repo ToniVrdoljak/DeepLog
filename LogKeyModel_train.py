@@ -2,6 +2,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.data import random_split
@@ -9,6 +10,7 @@ import argparse
 import os
 
 from utils import generate_from_labeled_file, generate_from_labeled_openstack_file
+from model import Model
 
 
 # Device configuration
@@ -32,21 +34,36 @@ def generate(name):
     return dataset
 
 
-class Model(nn.Module):
-    def __init__(self, num_keys, hidden_size, num_layers):
-        super(Model, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(num_keys, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, num_keys)
+def create_dataloaders(normal_path, abnormal_path, window_size):
+    normal_dataset = generate_from_labeled_file(normal_path, window_size)
+    abnormal_dataset = generate_from_labeled_file(abnormal_path, window_size+1)
 
-    def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return out
+    size_normal = len(normal_dataset)
+    size_abnormal = len(abnormal_dataset)
 
+    # This split ratio is used to create a balanced test and
+    # validation sets (equal number of normal and abnormal examples).
+    normal_train_dataset, normal_test_val_dataset = \
+        random_split(normal_dataset, [size_normal - size_abnormal, size_abnormal])
+
+    test_split = 0.5
+    val_split = 0.5
+
+    test_size = int(size_abnormal * test_split / (test_split + val_split))
+    val_size = size_abnormal - test_size
+
+    normal_test_dataset, normal_val_dataset = random_split(normal_dataset, [test_size, val_size])
+    abnormal_test_dataset, abnormal_val_dataset = random_split(abnormal_dataset, [test_size, val_size])
+
+    normal_train_dl = DataLoader(normal_train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+
+    normal_test_dl = DataLoader(normal_test_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    abnormal_test_dl = DataLoader(abnormal_test_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+
+    normal_val_dl = DataLoader(normal_val_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    abnormal_val_dl = DataLoader(abnormal_val_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+
+    return normal_train_dl, normal_test_dl, abnormal_test_dl, normal_val_dl, abnormal_val_dl
 
 if __name__ == '__main__':
 
@@ -67,22 +84,15 @@ if __name__ == '__main__':
     window_size = args.window_size
     snapshot_period = args.snapshot_period
 
-    model = Model(num_classes, hidden_size, num_layers).to(device)
-
-    seq_dataset = generate_from_labeled_file('/home/toni/Downloads/balanced/normal_train.txt', window_size)
-
-    train_split = 0.8
-    valid_split = 0.2
-
-    train_size = int(len(seq_dataset) * train_split / (train_split + valid_split))
-    valid_size = len(seq_dataset) - train_size
-
-    train_dataset, valid_dataset = random_split(seq_dataset, [train_size, valid_size])
-
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    # Defining dataloaders
+    normal_train_dl, normal_test_dl, abnormal_test_dl, normal_val_dl, abnormal_val_dl = \
+        create_dataloaders('/home/toni/Downloads/balanced/normal_train.txt',
+                           '/home/toni/Downloads/balanced/normal_train.txt',
+                           window_size)
 
     writer = SummaryWriter(log_dir='log/' + log)
+
+    model = Model(num_classes, hidden_size, num_layers).to(device)
 
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -91,11 +101,14 @@ if __name__ == '__main__':
 
     # Train the model
     start_time = time.time()
-    train_total_step = len(train_dataloader)
-    valid_total_step = len(valid_dataloader)
+    train_total_step = len(normal_train_dl)
+    valid_total_step = len(normal_val_dl) + len(abnormal_val_dl)
+
     for epoch in range(num_epochs):  # Loop over the train and validation datasets multiple times
         train_loss = 0
         valid_loss = 0
+
+        # Training
         for step, (seq, label) in enumerate(train_dataloader):
             # Forward pass
             seq = seq.clone().detach().view(-1, window_size).to(device)
@@ -109,13 +122,23 @@ if __name__ == '__main__':
             train_loss += loss.item()
             optimizer.step()
 
-        for step, (seq, label) in enumerate(valid_dataloader):
-            seq = seq.clone().detach().view(-1, window_size).to(device)
-            x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
-            output = model(x_onehot)
-            loss = criterion(output, label.to(device))
-            valid_loss += loss.item()
-            #writer.add_graph(model, x_onehot)
+        # Cross-validation
+        with torch.no_grad():
+
+            # Normal validation dataset
+            for step, (seq, label) in enumerate(normal_val_dl):
+                seq = seq.clone().detach().view(-1, window_size).to(device)
+                x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+                output = model(x_onehot)
+                loss = criterion(output, label.to(device))
+                valid_loss += loss.item()
+
+            # Abnormal validation dataset
+            for step, (seq, label) in enumerate(abnormal_val_dl):
+                seq = seq.clone().detach().view(-1, window_size).to(device)
+                x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+                output = model(x_onehot)
+
 
         print('Epoch [{}/{}], train_loss: {:.4f}, valid_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / train_total_step, valid_loss / valid_total_step))
         writer.add_scalar('train_loss', train_loss / train_total_step, epoch + 1)

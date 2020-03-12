@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import TensorDataset
 
 
-def generate_from_labeled_file(ds_path, window_size):
+def generate_from_labeled_hdfs_file(ds_path, window_size):
     num_sessions = 0
     inputs = []
     outputs = []
