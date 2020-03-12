@@ -51,9 +51,9 @@ class Model(nn.Module):
 if __name__ == '__main__':
 
     # Hyperparameters
-    num_classes = 43
-    num_epochs = 3000
-    batch_size = 256
+    num_classes = 31
+    num_epochs = 310
+    batch_size = 8192
     model_dir = 'model'
     log = 'Adam_batch_size={}_epochs={}'.format(str(batch_size), str(num_epochs))
     parser = argparse.ArgumentParser()
@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
     model = Model(num_classes, hidden_size, num_layers).to(device)
 
-    seq_dataset = generate_from_labeled_openstack_file('/home/toni/Downloads/openstack/normal_train.txt', window_size)
+    seq_dataset = generate_from_labeled_file('/home/toni/Downloads/balanced/normal_train.txt', window_size)
 
     train_split = 0.8
     valid_split = 0.2
