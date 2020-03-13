@@ -61,7 +61,6 @@ def train(model, optimizer, scheduler, train_dataloader, window_size):
             optimizer.step()
 
         print('Epoch [{}/{}], train_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / train_total_step))
-        writer.add_scalar('train_loss', train_loss / train_total_step, epoch + 1)
 
         scheduler.step(train_loss / train_total_step)
 
@@ -70,7 +69,7 @@ def train(model, optimizer, scheduler, train_dataloader, window_size):
                 os.makedirs(model_dir)
             torch.save(model.state_dict(), model_dir + '/' + log + "_iteration=" + str(epoch) + '.pt')
 
-        writer.flush()
+    return train_loss
 
 
 def validate(model, normal_val_loader, abnormal_val_loader, window_size):
@@ -115,17 +114,17 @@ def validate(model, normal_val_loader, abnormal_val_loader, window_size):
             'false positive (FP): {}, false negative (FN): {}, Precision: {:.3f}%, Recall: {:.3f}%, F1-measure: {:.3f}%'.format(
                 FP, FN, P, R, F1))
 
-        return F1
+        return P, R, F1
 
 
 if __name__ == '__main__':
 
     # Hyperparameters
     num_classes = 31
-    num_epochs = 2
+    num_epochs = 1
     batch_size = 8192
     model_dir = 'model'
-    log = 'Adam_batch_size={}_epochs={}'.format(str(batch_size), str(num_epochs))
+    log = 'cross_validation'
     parser = argparse.ArgumentParser()
     parser.add_argument('-num_layers', default=2, type=int)
     parser.add_argument('-hidden_size', default=64, type=int)
@@ -137,7 +136,7 @@ if __name__ == '__main__':
     num_candidates = args.num_candidates
     snapshot_period = args.snapshot_period
 
-    window_size_list = [5, 6, 7, 8, 9, 10, 11]
+    window_size_list = [5, 6]#, 7, 8, 9, 10, 11]
 
     model_dict = dict()
 
@@ -163,11 +162,15 @@ if __name__ == '__main__':
         start_time = time.time()
         train_total_step = len(normal_train_dataloader)
 
-        train(model, optimizer, scheduler, normal_train_dataloader, window_size)
+        train_loss = train(model, optimizer, scheduler, normal_train_dataloader, window_size)
 
-        F1_score = validate(model, normal_val_loader, abnormal_val_loader, window_size)
+        P, R, F1 = validate(model, normal_val_loader, abnormal_val_loader, window_size)
 
-        model_dict[window_size] = (model, F1_score)
+        model_dict[window_size] = (model, P, R, F1, train_loss)
+        writer.add_scalar('Precision', P, window_size)
+        writer.add_scalar('Recall', R, window_size)
+        writer.add_scalar('F1 score', F1, window_size)
+        writer.add_scalar('train_loss', train_loss, window_size)
 
     elapsed_time = time.time() - start_time
     print('elapsed_time: {:.3f}s'.format(elapsed_time))
