@@ -9,7 +9,7 @@ from torch.utils.data import random_split
 import argparse
 import os
 
-from utils import generate_from_labeled_file, generate_from_labeled_openstack_file
+from utils import generate_from_labeled_file, generate_from_labeled_openstack_file, create_cross_val_loader
 from model import Model
 
 
@@ -34,36 +34,12 @@ def generate(name):
     return dataset
 
 
-def create_dataloaders(normal_path, abnormal_path, window_size):
-    normal_dataset = generate_from_labeled_file(normal_path, window_size)
-    abnormal_dataset = generate_from_labeled_file(abnormal_path, window_size+1)
+def create_train_dataloader(normal_train_path, window_size):
+    normal_train_dataset = generate_from_labeled_file(normal_train_path, window_size)
+    normal_train_dataloader = DataLoader(normal_train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 
-    size_normal = len(normal_dataset)
-    size_abnormal = len(abnormal_dataset)
+    return normal_train_dataloader
 
-    # This split ratio is used to create a balanced test and
-    # validation sets (equal number of normal and abnormal examples).
-    normal_train_dataset, normal_test_val_dataset = \
-        random_split(normal_dataset, [size_normal - size_abnormal, size_abnormal])
-
-    test_split = 0.5
-    val_split = 0.5
-
-    test_size = int(size_abnormal * test_split / (test_split + val_split))
-    val_size = size_abnormal - test_size
-
-    normal_test_dataset, normal_val_dataset = random_split(normal_dataset, [test_size, val_size])
-    abnormal_test_dataset, abnormal_val_dataset = random_split(abnormal_dataset, [test_size, val_size])
-
-    normal_train_dl = DataLoader(normal_train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-
-    normal_test_dl = DataLoader(normal_test_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-    abnormal_test_dl = DataLoader(abnormal_test_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-
-    normal_val_dl = DataLoader(normal_val_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-    abnormal_val_dl = DataLoader(abnormal_val_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-
-    return normal_train_dl, normal_test_dl, abnormal_test_dl, normal_val_dl, abnormal_val_dl
 
 if __name__ == '__main__':
 
@@ -84,11 +60,10 @@ if __name__ == '__main__':
     window_size = args.window_size
     snapshot_period = args.snapshot_period
 
-    # Defining dataloaders
-    normal_train_dl, normal_test_dl, abnormal_test_dl, normal_val_dl, abnormal_val_dl = \
-        create_dataloaders('/home/toni/Downloads/balanced/normal_train.txt',
-                           '/home/toni/Downloads/balanced/normal_train.txt',
-                           window_size)
+    normal_train_dataloader = create_dataloaders('/home/toni/Downloads/balanced/normal_train.txt', window_size)
+
+    normal_cross_val_loader = create_train_dataloader('/home/toni/Downloads/balanced/normal_test.txt')
+    abnoramal_cross_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/anomaly.txt')
 
     writer = SummaryWriter(log_dir='log/' + log)
 
@@ -109,7 +84,7 @@ if __name__ == '__main__':
         valid_loss = 0
 
         # Training
-        for step, (seq, label) in enumerate(train_dataloader):
+        for step, (seq, label) in enumerate(normal_train_dataloader):
             # Forward pass
             seq = seq.clone().detach().view(-1, window_size).to(device)
             x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
@@ -122,23 +97,38 @@ if __name__ == '__main__':
             train_loss += loss.item()
             optimizer.step()
 
-        # Cross-validation
-        with torch.no_grad():
+    # Cross-validation
+    with torch.no_grad():
+        TP = 0
+        FP = 0
 
-            # Normal validation dataset
-            for step, (seq, label) in enumerate(normal_val_dl):
-                seq = seq.clone().detach().view(-1, window_size).to(device)
+        # Normal validation dataset
+        for line in test_normal_loader:
+            for i in range(len(line) - window_size):
+                seq = line[i:i + window_size]
+                label = line[i + window_size]
+                seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size).to(device)
                 x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+                label = torch.tensor(label).view(-1).to(device)
                 output = model(x_onehot)
-                loss = criterion(output, label.to(device))
-                valid_loss += loss.item()
+                predicted = torch.argsort(output, 1)[0][-num_candidates:]
+                if label not in predicted:
+                    FP += 1
+                    break
 
-            # Abnormal validation dataset
-            for step, (seq, label) in enumerate(abnormal_val_dl):
-                seq = seq.clone().detach().view(-1, window_size).to(device)
+        # Abnormal validation dataset
+        for line in test_abnormal_loader:
+            for i in range(len(line) - window_size):
+                seq = line[i:i + window_size]
+                label = line[i + window_size]
+                seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size).to(device)
                 x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+                label = torch.tensor(label).view(-1).to(device)
                 output = model(x_onehot)
-
+                predicted = torch.argsort(output, 1)[0][-num_candidates:]
+                if label not in predicted:
+                    TP += 1
+                    break
 
         print('Epoch [{}/{}], train_loss: {:.4f}, valid_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / train_total_step, valid_loss / valid_total_step))
         writer.add_scalar('train_loss', train_loss / train_total_step, epoch + 1)
