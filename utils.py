@@ -43,7 +43,7 @@ def generate_from_labeled_openstack_file(ds_path, window_size, num_classes):
     return dataset
 
 
-def create_cross_val_loader(name, num_classes):
+def create_cross_val_loader(name, window_size, num_classes):
     hdfs = []
     with open(name, 'r') as f:
         for ln in f.readlines():

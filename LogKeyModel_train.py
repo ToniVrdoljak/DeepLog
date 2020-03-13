@@ -9,7 +9,7 @@ from torch.utils.data import random_split
 import argparse
 import os
 
-from utils import generate_from_labeled_file, generate_from_labeled_openstack_file, create_cross_val_loader
+from utils import generate_from_labeled_hdfs_file, generate_from_labeled_openstack_file, create_cross_val_loader
 from model import Model
 
 
@@ -34,8 +34,8 @@ def generate(name):
     return dataset
 
 
-def create_train_dataloader(normal_train_path, window_size):
-    normal_train_dataset = generate_from_labeled_file(normal_train_path, window_size)
+def create_train_dataloader(normal_train_path, window_size, num_classes):
+    normal_train_dataset = generate_from_labeled_hdfs_file(normal_train_path, window_size, num_classes)
     normal_train_dataloader = DataLoader(normal_train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 
     return normal_train_dataloader
@@ -45,7 +45,7 @@ if __name__ == '__main__':
 
     # Hyperparameters
     num_classes = 31
-    num_epochs = 310
+    num_epochs = 2
     batch_size = 8192
     model_dir = 'model'
     log = 'Adam_batch_size={}_epochs={}'.format(str(batch_size), str(num_epochs))
@@ -54,20 +54,23 @@ if __name__ == '__main__':
     parser.add_argument('-hidden_size', default=64, type=int)
     parser.add_argument('-window_size', default=10, type=int)
     parser.add_argument('-snapshot_period', default=10, type=int)
+    parser.add_argument('-num_candidates', default=9, type=int)
     args = parser.parse_args()
     num_layers = args.num_layers
     hidden_size = args.hidden_size
     window_size = args.window_size
+    num_candidates = args.num_candidates
     snapshot_period = args.snapshot_period
 
-    normal_train_dataloader = create_dataloaders('/home/toni/Downloads/balanced/normal_train.txt', window_size)
+    normal_train_dataloader = create_train_dataloader('/home/toni/Downloads/balanced/normal_train.txt', window_size, num_classes)
 
-    normal_cross_val_loader = create_train_dataloader('/home/toni/Downloads/balanced/normal_test.txt')
-    abnoramal_cross_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/anomaly.txt')
+    normal_cross_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/normal_test.txt', window_size, num_classes)
+    abnormal_cross_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/anomaly.txt', window_size, num_classes)
 
     writer = SummaryWriter(log_dir='log/' + log)
 
-    model = Model(num_classes, hidden_size, num_layers).to(device)
+    input_size = num_classes + 1
+    model = Model(num_classes+1, hidden_size, num_layers, device).to(device)
 
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -76,8 +79,7 @@ if __name__ == '__main__':
 
     # Train the model
     start_time = time.time()
-    train_total_step = len(normal_train_dl)
-    valid_total_step = len(normal_val_dl) + len(abnormal_val_dl)
+    train_total_step = len(normal_train_dataloader)
 
     for epoch in range(num_epochs):  # Loop over the train and validation datasets multiple times
         train_loss = 0
@@ -87,7 +89,7 @@ if __name__ == '__main__':
         for step, (seq, label) in enumerate(normal_train_dataloader):
             # Forward pass
             seq = seq.clone().detach().view(-1, window_size).to(device)
-            x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+            x_onehot = torch.nn.functional.one_hot(seq.long(), input_size).float()
             output = model(x_onehot)
             loss = criterion(output, label.to(device))
 
@@ -97,18 +99,30 @@ if __name__ == '__main__':
             train_loss += loss.item()
             optimizer.step()
 
+        print('Epoch [{}/{}], train_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / train_total_step))
+        writer.add_scalar('train_loss', train_loss / train_total_step, epoch + 1)
+
+        scheduler.step(train_loss / train_total_step)
+
+        if epoch % snapshot_period == 0:
+            if not os.path.isdir(model_dir):
+                os.makedirs(model_dir)
+            torch.save(model.state_dict(), model_dir + '/' + log + "_iteration=" + str(epoch) + '.pt')
+
+        writer.flush()
+
     # Cross-validation
     with torch.no_grad():
         TP = 0
         FP = 0
 
         # Normal validation dataset
-        for line in test_normal_loader:
+        for line in normal_cross_val_loader:
             for i in range(len(line) - window_size):
                 seq = line[i:i + window_size]
                 label = line[i + window_size]
                 seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size).to(device)
-                x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+                x_onehot = torch.nn.functional.one_hot(seq.long(), input_size).float()
                 label = torch.tensor(label).view(-1).to(device)
                 output = model(x_onehot)
                 predicted = torch.argsort(output, 1)[0][-num_candidates:]
@@ -117,12 +131,12 @@ if __name__ == '__main__':
                     break
 
         # Abnormal validation dataset
-        for line in test_abnormal_loader:
+        for line in abnormal_cross_val_loader:
             for i in range(len(line) - window_size):
                 seq = line[i:i + window_size]
                 label = line[i + window_size]
                 seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size).to(device)
-                x_onehot = torch.nn.functional.one_hot(seq.long(), num_classes).float()
+                x_onehot = torch.nn.functional.one_hot(seq.long(), input_size).float()
                 label = torch.tensor(label).view(-1).to(device)
                 output = model(x_onehot)
                 predicted = torch.argsort(output, 1)[0][-num_candidates:]
@@ -130,18 +144,6 @@ if __name__ == '__main__':
                     TP += 1
                     break
 
-        print('Epoch [{}/{}], train_loss: {:.4f}, valid_loss: {:.4f}'.format(epoch + 1, num_epochs, train_loss / train_total_step, valid_loss / valid_total_step))
-        writer.add_scalar('train_loss', train_loss / train_total_step, epoch + 1)
-        writer.add_scalar('valid_loss', valid_loss / valid_total_step, epoch + 1)
-
-        scheduler.step(valid_loss / valid_total_step)
-
-        if epoch % snapshot_period == 0:
-            if not os.path.isdir(model_dir):
-                os.makedirs(model_dir)
-            torch.save(model.state_dict(), model_dir + '/' + log + "_iteration=" + str(epoch) + '.pt')
-
-        writer.flush()
     elapsed_time = time.time() - start_time
     print('elapsed_time: {:.3f}s'.format(elapsed_time))
     writer.close()
