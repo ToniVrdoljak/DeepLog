@@ -106,7 +106,7 @@ def validate(model, normal_val_loader, abnormal_val_loader):
                     TP += 1
                     break
 
-        FN = len(test_abnormal_loader) - TP
+        FN = len(abnormal_val_loader) - TP
         P = 100 * TP / (TP + FP)
         R = 100 * TP / (TP + FN)
         F1 = 2 * P * R / (P + R)
