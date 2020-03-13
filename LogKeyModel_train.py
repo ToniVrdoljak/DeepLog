@@ -41,52 +41,13 @@ def create_train_dataloader(normal_train_path, window_size, num_classes):
     return normal_train_dataloader
 
 
-if __name__ == '__main__':
-
-    # Hyperparameters
-    num_classes = 31
-    num_epochs = 2
-    batch_size = 8192
-    model_dir = 'model'
-    log = 'Adam_batch_size={}_epochs={}'.format(str(batch_size), str(num_epochs))
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-num_layers', default=2, type=int)
-    parser.add_argument('-hidden_size', default=64, type=int)
-    parser.add_argument('-window_size', default=10, type=int)
-    parser.add_argument('-snapshot_period', default=10, type=int)
-    parser.add_argument('-num_candidates', default=9, type=int)
-    args = parser.parse_args()
-    num_layers = args.num_layers
-    hidden_size = args.hidden_size
-    window_size = args.window_size
-    num_candidates = args.num_candidates
-    snapshot_period = args.snapshot_period
-
-    normal_train_dataloader = create_train_dataloader('/home/toni/Downloads/balanced/normal_train.txt', window_size, num_classes)
-
-    normal_cross_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/normal_test.txt', window_size, num_classes)
-    abnormal_cross_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/anomaly.txt', window_size, num_classes)
-
-    writer = SummaryWriter(log_dir='log/' + log)
-
-    input_size = num_classes + 1
-    model = Model(num_classes+1, hidden_size, num_layers, device).to(device)
-
-    # Loss and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, nesterov=True)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, threshold=0.001, threshold_mode='abs', cooldown=5, eps=0)
-
-    # Train the model
-    start_time = time.time()
-    train_total_step = len(normal_train_dataloader)
-
+def train(model, optimizer, scheduler, train_dataloader):
     for epoch in range(num_epochs):  # Loop over the train and validation datasets multiple times
         train_loss = 0
         valid_loss = 0
 
         # Training
-        for step, (seq, label) in enumerate(normal_train_dataloader):
+        for step, (seq, label) in enumerate(train_dataloader):
             # Forward pass
             seq = seq.clone().detach().view(-1, window_size).to(device)
             x_onehot = torch.nn.functional.one_hot(seq.long(), input_size).float()
@@ -111,13 +72,14 @@ if __name__ == '__main__':
 
         writer.flush()
 
-    # Cross-validation
+
+def validate(model, normal_val_loader, abnormal_val_loader):
     with torch.no_grad():
         TP = 0
         FP = 0
 
         # Normal validation dataset
-        for line in normal_cross_val_loader:
+        for line in normal_val_loader:
             for i in range(len(line) - window_size):
                 seq = line[i:i + window_size]
                 label = line[i + window_size]
@@ -131,7 +93,7 @@ if __name__ == '__main__':
                     break
 
         # Abnormal validation dataset
-        for line in abnormal_cross_val_loader:
+        for line in abnormal_val_loader:
             for i in range(len(line) - window_size):
                 seq = line[i:i + window_size]
                 label = line[i + window_size]
@@ -143,6 +105,60 @@ if __name__ == '__main__':
                 if label not in predicted:
                     TP += 1
                     break
+
+        FN = len(test_abnormal_loader) - TP
+        P = 100 * TP / (TP + FP)
+        R = 100 * TP / (TP + FN)
+        F1 = 2 * P * R / (P + R)
+
+        print(
+            'false positive (FP): {}, false negative (FN): {}, Precision: {:.3f}%, Recall: {:.3f}%, F1-measure: {:.3f}%'.format(
+                FP, FN, P, R, F1))
+
+
+if __name__ == '__main__':
+
+    # Hyperparameters
+    num_classes = 31
+    num_epochs = 2
+    batch_size = 8192
+    model_dir = 'model'
+    log = 'Adam_batch_size={}_epochs={}'.format(str(batch_size), str(num_epochs))
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-num_layers', default=2, type=int)
+    parser.add_argument('-hidden_size', default=64, type=int)
+    parser.add_argument('-window_size', default=10, type=int)
+    parser.add_argument('-snapshot_period', default=10, type=int)
+    parser.add_argument('-num_candidates', default=9, type=int)
+    args = parser.parse_args()
+    num_layers = args.num_layers
+    hidden_size = args.hidden_size
+    window_size = args.window_size
+    num_candidates = args.num_candidates
+    snapshot_period = args.snapshot_period
+
+    normal_train_dataloader = create_train_dataloader('/home/toni/Downloads/balanced/normal_train.txt', window_size, num_classes)
+
+    normal_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/normal_test.txt', window_size, num_classes)
+    abnormal_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/anomaly.txt', window_size, num_classes)
+
+    writer = SummaryWriter(log_dir='log/' + log)
+
+    input_size = num_classes + 1
+    model = Model(num_classes+1, hidden_size, num_layers, device).to(device)
+
+    # Loss and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, nesterov=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, threshold=0.001, threshold_mode='abs', cooldown=5, eps=0)
+
+    # Train the model
+    start_time = time.time()
+    train_total_step = len(normal_train_dataloader)
+
+    train(model, optimizer, scheduler, normal_train_dataloader)
+
+    validate(model, normal_val_loader, abnormal_val_loader)
 
     elapsed_time = time.time() - start_time
     print('elapsed_time: {:.3f}s'.format(elapsed_time))
