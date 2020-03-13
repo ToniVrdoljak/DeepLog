@@ -41,7 +41,7 @@ def create_train_dataloader(normal_train_path, window_size, num_classes):
     return normal_train_dataloader
 
 
-def train(model, optimizer, scheduler, train_dataloader):
+def train(model, optimizer, scheduler, train_dataloader, window_size):
     for epoch in range(num_epochs):  # Loop over the train and validation datasets multiple times
         train_loss = 0
         valid_loss = 0
@@ -73,7 +73,7 @@ def train(model, optimizer, scheduler, train_dataloader):
         writer.flush()
 
 
-def validate(model, normal_val_loader, abnormal_val_loader):
+def validate(model, normal_val_loader, abnormal_val_loader, window_size):
     with torch.no_grad():
         TP = 0
         FP = 0
@@ -115,6 +115,8 @@ def validate(model, normal_val_loader, abnormal_val_loader):
             'false positive (FP): {}, false negative (FN): {}, Precision: {:.3f}%, Recall: {:.3f}%, F1-measure: {:.3f}%'.format(
                 FP, FN, P, R, F1))
 
+        return F1
+
 
 if __name__ == '__main__':
 
@@ -127,38 +129,45 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-num_layers', default=2, type=int)
     parser.add_argument('-hidden_size', default=64, type=int)
-    parser.add_argument('-window_size', default=10, type=int)
     parser.add_argument('-snapshot_period', default=10, type=int)
     parser.add_argument('-num_candidates', default=9, type=int)
     args = parser.parse_args()
     num_layers = args.num_layers
     hidden_size = args.hidden_size
-    window_size = args.window_size
     num_candidates = args.num_candidates
     snapshot_period = args.snapshot_period
 
-    normal_train_dataloader = create_train_dataloader('/home/toni/Downloads/balanced/normal_train.txt', window_size, num_classes)
+    window_size_list = [5, 6, 7, 8, 9, 10, 11]
 
-    normal_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/normal_test.txt', window_size, num_classes)
-    abnormal_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/anomaly.txt', window_size, num_classes)
+    model_dict = dict()
 
-    writer = SummaryWriter(log_dir='log/' + log)
+    for window_size in window_size_list:
 
-    input_size = num_classes + 1
-    model = Model(num_classes+1, hidden_size, num_layers, device).to(device)
+        normal_train_dataloader = create_train_dataloader('/home/toni/Downloads/balanced/normal_train.txt', window_size, num_classes)
 
-    # Loss and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, nesterov=True)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, threshold=0.001, threshold_mode='abs', cooldown=5, eps=0)
+        normal_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/normal_test.txt', window_size, num_classes)
+        abnormal_val_loader = create_cross_val_loader('/home/toni/Downloads/balanced/anomaly.txt', window_size, num_classes)
 
-    # Train the model
-    start_time = time.time()
-    train_total_step = len(normal_train_dataloader)
+        writer = SummaryWriter(log_dir='log/' + log)
 
-    train(model, optimizer, scheduler, normal_train_dataloader)
+        input_size = num_classes + 1
 
-    validate(model, normal_val_loader, abnormal_val_loader)
+        model = Model(num_classes+1, hidden_size, num_layers, device).to(device)
+
+        # Loss and optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, nesterov=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, threshold=0.001, threshold_mode='abs', cooldown=5, eps=0)
+
+        # Train the model
+        start_time = time.time()
+        train_total_step = len(normal_train_dataloader)
+
+        train(model, optimizer, scheduler, normal_train_dataloader, window_size)
+
+        F1_score = validate(model, normal_val_loader, abnormal_val_loader, window_size)
+
+        model_dict[window_size] = (model, F1_score)
 
     elapsed_time = time.time() - start_time
     print('elapsed_time: {:.3f}s'.format(elapsed_time))
